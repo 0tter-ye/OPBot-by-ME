@@ -30,14 +30,13 @@ from config import API_KEY, API_SECRET  # Ensure config.py exists
 
 # Initialize Bybit API
 client = HTTP(api_key=API_KEY, api_secret=API_SECRET, testnet=True)
-symbol = "BTCUSDT"  # May need to be BTCUSDT.P
+symbol = "BTCUSDT"
 
 # Initialize MT5 connection
 if not mt5.initialize():
     logging.error(f"Failed to initialize MT5: {mt5.last_error()}")
     exit()
 
-# Replace with your MT5 demo credentials
 mt5_login = 3263156
 mt5_password = "Bl1SrRhFb0JP@E4"
 mt5_server = "Bybit-Demo"
@@ -46,7 +45,6 @@ if not mt5.login(mt5_login, mt5_password, mt5_server):
     exit()
 logging.info("Connected to MT5 demo account")
 
-# Fetch initial MT5 account balance via account_info
 account_info = mt5.account_info()
 if account_info is None:
     logging.error("Failed to fetch MT5 account info")
@@ -54,7 +52,7 @@ if account_info is None:
 initial_balance = account_info.balance
 logging.info(f"MT5 Account Balance: {initial_balance} USDT")
 
-# Find the correct symbol and get specs
+# Symbol setup
 symbol_info = mt5.symbol_info(symbol)
 if symbol_info is None:
     logging.warning(f"{symbol} not found. Searching for BTCUSDT variant...")
@@ -65,30 +63,22 @@ if symbol_info is None:
     symbol = all_symbols[0]
     logging.info(f"Using symbol: {symbol}")
     symbol_info = mt5.symbol_info(symbol)
-    if symbol_info is None:
-        logging.error(f"Still failed to fetch info for {symbol}")
-        exit()
 
-logging.info(f"SymbolInfo attributes: {dir(symbol_info)}")
 raw_point = symbol_info.point
-logging.info(f"Raw Point Value: {raw_point}")
 min_volume = symbol_info.volume_min
 max_volume = symbol_info.volume_max
 volume_step = symbol_info.volume_step
 tick_size = raw_point
-if tick_size != 0.00001:
-    logging.warning(f"Unexpected tick size {tick_size} for BTCUSDT. Expected 0.00001.")
 min_stop_level = symbol_info.trade_stops_level
-logging.info(f"Symbol specs for {symbol}: Min Volume: {min_volume}, Max Volume: {max_volume}, Step: {volume_step}, Tick Size: {tick_size}, Min Stop Level: {min_stop_level}")
 
-# Wallet class with risk management and periodic summaries
+# Wallet class
 class Wallet:
-    def __init__(self, max_risk_per_trade=0.05, max_drawdown=0.1):  # 5% risk per trade
+    def __init__(self, max_risk_per_trade=0.05, max_drawdown=0.1):
         account_info = mt5.account_info()
         self.balance = account_info.balance if account_info else 0
         self.initial_balance = self.balance
         self.positions = {}
-        self.trade_history = []  # List of dicts with trade details
+        self.trade_history = []
         self.max_risk_per_trade = max_risk_per_trade
         self.max_drawdown = max_drawdown
         self.paused = False
@@ -147,15 +137,17 @@ class Wallet:
             del self.positions[symbol]
         self.sync_balance()
 
-    def get_performance_summary(self):
+    def get_performance_summary(self, trades=None):
+        if trades is None:
+            trades = self.trade_history
         self.sync_balance()
-        total_profit = sum(trade['profit'] for trade in self.trade_history)
-        total_trades = len(self.trade_history)
-        final_value = self.balance
+        total_profit = sum(trade['profit'] for trade in trades)
+        total_trades = len(trades)
+        final_value = self.initial_balance + total_profit
         total_return = (final_value - self.initial_balance) / self.initial_balance if self.initial_balance > 0 else 0
-        profit_factor = float('inf') if sum(1 for t in self.trade_history if t['profit'] <= 0) == 0 else sum(t['profit'] for t in self.trade_history if t['profit'] > 0) / abs(sum(t['profit'] for t in self.trade_history if t['profit'] <= 0))
-        avg_trade_return = np.mean([t['profit'] / (t['qty'] * t['entry_price']) * 100 for t in self.trade_history]) if total_trades > 0 else 0
-        win_rate = len([t for t in self.trade_history if t['profit'] > 0]) / total_trades * 100 if total_trades > 0 else 0
+        profit_factor = float('inf') if sum(1 for t in trades if t['profit'] <= 0) == 0 else sum(t['profit'] for t in trades if t['profit'] > 0) / abs(sum(t['profit'] for t in trades if t['profit'] <= 0))
+        avg_trade_return = np.mean([t['profit'] / (t['qty'] * t['entry_price']) * 100 for t in trades]) if total_trades > 0 else 0
+        win_rate = len([t for t in trades if t['profit'] > 0]) / total_trades * 100 if total_trades > 0 else 0
         return {
             'start_value': self.initial_balance,
             'final_value': final_value,
@@ -167,52 +159,39 @@ class Wallet:
             'current_balance': self.balance
         }
 
-    def get_periodic_summary(self, period='daily'):
-        """Generate summary for daily, weekly, or monthly periods."""
+    def get_periodic_performance(self):
         now = datetime.now()
-        if period == 'daily':
-            start_time = now.replace(hour=0, minute=0, second=0, microsecond=0)
-        elif period == 'weekly':
-            start_time = now - timedelta(days=now.weekday())  # Start of the week (Monday)
-            start_time = start_time.replace(hour=0, minute=0, second=0, microsecond=0)
-        elif period == 'monthly':
-            start_time = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-        else:
-            raise ValueError("Period must be 'daily', 'weekly', or 'monthly'")
-
-        period_trades = [t for t in self.trade_history if t['timestamp'] >= start_time]
-        total_profit = sum(t['profit'] for t in period_trades)
-        total_trades = len(period_trades)
-        win_trades = len([t for t in period_trades if t['profit'] > 0])
-        win_rate = win_trades / total_trades * 100 if total_trades > 0 else 0
-        profit_factor = float('inf') if sum(1 for t in period_trades if t['profit'] <= 0) == 0 else sum(t['profit'] for t in period_trades if t['profit'] > 0) / abs(sum(t['profit'] for t in period_trades if t['profit'] <= 0))
-        avg_trade_profit = total_profit / total_trades if total_trades > 0 else 0
-
-        summary = {
-            'period': period.capitalize(),
-            'start_time': start_time.strftime('%Y-%m-%d %H:%M:%S'),
-            'total_profit': total_profit,
-            'total_trades': total_trades,
-            'win_rate': win_rate,
-            'profit_factor': profit_factor,
-            'avg_trade_profit': avg_trade_profit
+        periods = {
+            'Hourly': timedelta(hours=1),
+            '4-Hourly': timedelta(hours=4),
+            '12-Hourly': timedelta(hours=12),
+            'Daily': timedelta(days=1),
+            'Weekly': timedelta(weeks=1),
+            'Monthly': timedelta(days=30)
         }
-        return summary
-
-    def log_periodic_summaries(self):
-        """Log summaries for daily, weekly, and monthly periods."""
-        for period in ['daily', 'weekly', 'monthly']:
-            summary = self.get_periodic_summary(period)
-            logging.info(f"{summary['period']} Summary (Since {summary['start_time']}): "
-                         f"Total Profit: {summary['total_profit']:.2f} USDT, "
-                         f"Total Trades: {summary['total_trades']}, "
-                         f"Win Rate: {summary['win_rate']:.2f}%, "
-                         f"Profit Factor: {summary['profit_factor']:.2f}, "
-                         f"Avg Trade Profit: {summary['avg_trade_profit']:.2f} USDT")
+        performance = {}
+        for period_name, delta in periods.items():
+            start_time = now - delta
+            period_trades = [trade for trade in self.trade_history if trade['timestamp'] >= start_time]
+            if period_trades:
+                summary = self.get_performance_summary(period_trades)
+                performance[period_name] = summary
+            else:
+                performance[period_name] = {
+                    'start_value': self.initial_balance,
+                    'final_value': self.initial_balance,
+                    'total_return': 0.0,
+                    'profit_factor': 0.0,
+                    'avg_trade_return': 0.0,
+                    'total_trades': 0,
+                    'win_rate': 0.0,
+                    'current_balance': self.balance
+                }
+        return performance
 
 wallet = Wallet()
 
-# Markov Chain with updated transition matrix
+# Markov Chain
 class MarkovChain:
     def __init__(self, states, transition_matrix):
         self.states = states
@@ -249,33 +228,79 @@ states = ["Loss", "Win"]
 transition_matrix = np.array([[0, 1], [0, 1]], dtype=float)
 markov_chain = MarkovChain(states, transition_matrix)
 
-# Fetch multi-timeframe data
-def fetch_multi_timeframe_data(symbol, timeframes=["5", "15", "60"], limit=200):
-    data = {}
-    for tf in timeframes:
-        try:
-            response = client.get_kline(category="linear", symbol=symbol, interval=tf, limit=limit)
-            if "result" not in response or "list" not in response["result"]:
-                logging.error(f"Invalid API response for timeframe {tf}")
-                continue
-            
-            df = pd.DataFrame(response["result"]["list"], columns=["timestamp", "open", "high", "low", "close", "volume", "turnover"])
-            df["timestamp"] = pd.to_datetime(df["timestamp"].astype(np.int64), unit="ms")
-            df[["open", "high", "low", "close", "volume", "turnover"]] = df[["open", "high", "low", "close", "volume", "turnover"]].astype(float)
-            df["returns"] = df["close"].pct_change()
-            df["high_low"] = df["high"] - df["low"]
-            df["high_close_prev"] = abs(df["high"] - df["close"].shift(1))
-            df["low_close_prev"] = abs(df["low"] - df["close"].shift(1))
-            df["tr"] = df[["high_low", "high_close_prev", "low_close_prev"]].max(axis=1)
-            df["atr"] = df["tr"].rolling(window=14).mean()
-            df = df.drop(columns=["high_low", "high_close_prev", "low_close_prev", "tr"]).dropna()
-            data[tf] = df
-            logging.info(f"Fetched {tf}-minute data with {len(df)} rows")
-        except Exception as e:
-            logging.error(f"Error fetching {tf}-minute data: {e}")
-    return data
+# Updated fetch_data with sorting
+def fetch_data(symbol, timeframe, limit=200):
+    try:
+        response = client.get_kline(category="linear", symbol=symbol, interval=timeframe, limit=limit)
+        if "result" not in response or "list" not in response["result"]:
+            logging.error(f"Invalid API response structure for {timeframe} timeframe")
+            return pd.DataFrame()
+        
+        data = response["result"]["list"]
+        df = pd.DataFrame(data, columns=["timestamp", "open", "high", "low", "close", "volume", "turnover"])
+        df["timestamp"] = pd.to_datetime(df["timestamp"].astype(np.int64), unit="ms")
+        df[["open", "high", "low", "close", "volume", "turnover"]] = df[["open", "high", "low", "close", "volume", "turnover"]].astype(float)
+        df["returns"] = df["close"].pct_change()
+        df["high_low"] = df["high"] - df["low"]
+        df["high_close_prev"] = abs(df["high"] - df["close"].shift(1))
+        df["low_close_prev"] = abs(df["low"] - df["close"].shift(1))
+        df["tr"] = df[["high_low", "high_close_prev", "low_close_prev"]].max(axis=1)
+        df["atr"] = df["tr"].rolling(window=14).mean()
+        df = df.drop(columns=["high_low", "high_close_prev", "low_close_prev", "tr"])
+        df = df.dropna()
+        df.columns = [f"{col}_{timeframe}m" if col not in ["timestamp"] else col for col in df.columns]
+        # Sort by timestamp to ensure merge_asof compatibility
+        df = df.sort_values("timestamp")
+        return df
+    except Exception as e:
+        logging.error(f"Error fetching {timeframe}min data: {e}")
+        return pd.DataFrame()
 
-# Fetch real-time order book data from MT5
+# Updated fetch_combined_data with sorting and validation
+def fetch_combined_data(symbol, timeframes=["1", "3", "5"], limit=200):
+    dfs = {}
+    for tf in timeframes:
+        df = fetch_data(symbol, tf, limit)
+        if not df.empty:
+            dfs[tf] = df
+        else:
+            logging.warning(f"Failed to fetch {tf}min data")
+    
+    if not dfs:
+        logging.error("No data fetched for any timeframe. Exiting.")
+        return pd.DataFrame()
+    
+    # Use the shortest timeframe (1m) as base and ensure it's sorted
+    base_tf = min(timeframes, key=int)
+    combined_df = dfs[base_tf]
+    if not combined_df["timestamp"].is_monotonic_increasing:
+        logging.warning(f"Base timeframe {base_tf}m timestamps not sorted. Sorting now.")
+        combined_df = combined_df.sort_values("timestamp")
+    
+    # Merge other timeframes
+    for tf in timeframes:
+        if tf != base_tf:
+            if not dfs[tf]["timestamp"].is_monotonic_increasing:
+                logging.warning(f"{tf}m timestamps not sorted. Sorting now.")
+                dfs[tf] = dfs[tf].sort_values("timestamp")
+            try:
+                combined_df = pd.merge_asof(
+                    combined_df,
+                    dfs[tf],
+                    on="timestamp",
+                    direction="nearest",
+                    tolerance=pd.Timedelta(minutes=int(tf)),
+                    suffixes=("", f"_{tf}m")
+                )
+            except ValueError as e:
+                logging.error(f"Failed to merge {tf}m data: {e}")
+                return pd.DataFrame()
+    
+    combined_df = combined_df.dropna()
+    logging.info(f"Combined data shape: {combined_df.shape}, Timeframes: {timeframes}")
+    return combined_df
+
+# Other utility functions
 def fetch_order_book(symbol, df):
     try:
         tick = mt5.symbol_info_tick(symbol)
@@ -285,7 +310,7 @@ def fetch_order_book(symbol, df):
         bid_price = tick.bid
         ask_price = tick.ask
         current_price = (bid_price + ask_price) / 2
-        last_close = df["close"].iloc[-1] if not df.empty else None
+        last_close = df["close_5m"].iloc[-1] if not df.empty else None
         if last_close and abs(current_price - last_close) / last_close > 0.5:
             logging.warning(f"Tick price {current_price} deviates significantly from close {last_close}. Using close price.")
             current_price = last_close
@@ -294,24 +319,14 @@ def fetch_order_book(symbol, df):
         logging.error(f"Error fetching order book: {e}")
         return [100.0], [10], [100.1], [10]
 
-def fetch_l2_order_book(symbol):
-    return [{"price": 100.0, "size": 5}], [{"price": 100.1, "size": 5}]
-
-def calculate_microstructure_noise(bid_prices, bid_volumes, ask_prices, ask_volumes):
-    return 0.001
-
-def calculate_fractal_dimension(df):
-    return 1.5
-
-def hurst_exponent(time_series):
-    return 0.5
-
 def calculate_bid_ask_imbalance(bid_volumes, ask_volumes):
     total_bid_volume = sum(bid_volumes)
     total_ask_volume = sum(ask_volumes)
     return (total_bid_volume - total_ask_volume) / (total_bid_volume + total_ask_volume) if (total_bid_volume + total_ask_volume) > 0 else 0
 
-# Adjusted volume function with warning for max cap
+def hurst_exponent(time_series):
+    return 0.5  # Placeholder; implement if needed
+
 def adjust_volume(volume, min_vol, max_vol, step):
     volume = max(min_vol, min(max_vol, volume))
     volume = round(volume / step) * step
@@ -319,173 +334,122 @@ def adjust_volume(volume, min_vol, max_vol, step):
         logging.warning(f"Volume capped at max: {max_vol}")
     return round(volume, 6)
 
-# Train models with multi-timeframe data
-def train_multi_tf_models(multi_tf_data):
-    if not multi_tf_data or any(tf not in multi_tf_data for tf in ["5", "15", "60"]):
-        logging.error("Missing timeframe data for training")
+# Train models
+def train_models(df):
+    if df.empty or not any(col.endswith("_5m") for col in df.columns):
+        logging.error("DataFrame is empty or missing required 5m columns")
         return None, None, None
     
-    # Use 5-minute data as the base timeframe
-    df_5m = multi_tf_data["5"]
-    df_15m = multi_tf_data["15"]
-    df_60m = multi_tf_data["60"]
-    
-    # Resample 15m and 60m to align with 5m timestamps
-    df_15m_resampled = df_15m.set_index("timestamp").resample("5min").ffill().reindex(df_5m["timestamp"]).reset_index()
-    df_60m_resampled = df_60m.set_index("timestamp").resample("5min").ffill().reindex(df_5m["timestamp"]).reset_index()
-    
-    # Combine features into a single DataFrame
-    combined_df = pd.DataFrame(index=df_5m.index)
-    for tf, df in [("5", df_5m), ("15", df_15m_resampled), ("60", df_60m_resampled)]:
-        combined_df[f"{tf}_open"] = df["open"]
-        combined_df[f"{tf}_high"] = df["high"]
-        combined_df[f"{tf}_low"] = df["low"]
-        combined_df[f"{tf}_close"] = df["close"]
-        combined_df[f"{tf}_volume"] = df["volume"]
-        combined_df[f"{tf}_returns"] = df["returns"]
-        combined_df[f"{tf}_atr"] = df["atr"]
-    
-    # Calculate target based on 5-minute data
-    y = (df_5m["close"].shift(-1) > df_5m["close"]).astype(int)
-    
-    # Align X and y by dropping NaNs from both
-    combined_df["target"] = y
-    aligned_df = combined_df.dropna()
-    
-    if len(aligned_df) < 2:  # Need at least 2 samples for train-test split
-        logging.error(f"Insufficient aligned data for training: {len(aligned_df)} samples")
-        return None, None, None
-    
-    X = aligned_df.drop(columns=["target"])
-    y = aligned_df["target"]
-    
+    feature_cols = [col for col in df.columns if col not in ["timestamp"] and not col.startswith("turnover")]
+    X = df[feature_cols].iloc[:-1]
+    y = (df["close_5m"].shift(-1) > df["close_5m"]).astype(int).iloc[:-1]
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
     scaler = StandardScaler()
     X_train_scaled = scaler.fit_transform(X_train)
     X_test_scaled = scaler.transform(X_test)
-    
+
     rf_model = RandomForestClassifier(n_estimators=100, random_state=42)
     rf_model.fit(X_train_scaled, y_train)
     rf_accuracy = rf_model.score(X_test_scaled, y_test)
-    
+
     dt_model = DecisionTreeClassifier(max_depth=1, random_state=42)
     dt_model.fit(X_train_scaled, y_train)
     dt_accuracy = dt_model.score(X_test_scaled, y_test)
-    
+
     logging.info(f"RF Model Accuracy: {rf_accuracy:.2f}")
     logging.info(f"DT Model Accuracy: {dt_accuracy:.2f}, Max Depth: {dt_model.get_depth()}, Leaves: {dt_model.get_n_leaves()}")
     return rf_model, dt_model, scaler
 
 # Train models at startup
-multi_tf_data_initial = fetch_multi_timeframe_data(symbol, timeframes=["5", "15", "60"], limit=500)
-rf_model, dt_model, scaler = train_multi_tf_models(multi_tf_data_initial)
+df_initial = fetch_combined_data(symbol, timeframes=["1", "3", "5"], limit=500)
+if df_initial.empty:
+    logging.error("Initial data fetch failed. Exiting.")
+    exit()
+rf_model, dt_model, scaler = train_models(df_initial)
 if rf_model is None or dt_model is None or scaler is None:
-    logging.error("Multi-timeframe model training failed. Exiting.")
+    logging.error("Model training failed. Exiting.")
     exit()
 
-# Execute Trade with multi-timeframe data and additional logging
-def execute_trade(prediction, symbol, multi_tf_data, confidence_threshold=0.9):
+# Execute trade
+def execute_trade(prediction, symbol, df, confidence_threshold=0.9, markov_win_prob=0.0):
     if wallet.paused:
         logging.warning("Trading paused.")
         return
     
     side = "Buy" if prediction == 1 else "Sell"
     try:
-        df_5m = multi_tf_data["5"]
-        df_15m = multi_tf_data["15"]
-        df_60m = multi_tf_data["60"]
-        logging.info(f"Data rows - 5m: {len(df_5m)}, 15m: {len(df_15m)}, 60m: {len(df_60m)}")
-        
-        bid_prices, bid_volumes, ask_prices, ask_volumes = fetch_order_book(symbol, df_5m)
+        bid_prices, bid_volumes, ask_prices, ask_volumes = fetch_order_book(symbol, df)
         current_price = (min(ask_prices) + max(bid_prices)) / 2
         if current_price == 100.05:
-            current_price = df_5m["close"].iloc[-1]
+            current_price = df["close_5m"].iloc[-1]
             logging.warning(f"Using fallback current price: {current_price} from DataFrame")
+        atr_5m = df["atr_5m"].iloc[-1]
+        atr_1m = df["atr_1m"].iloc[-1] if "atr_1m" in df.columns else atr_5m
         
-        # Use 60-minute ATR for stop-loss/take-profit
-        atr_60m = df_60m["atr"].iloc[-1]
-        logging.info(f"60m ATR: {atr_60m}")
         max_sl_distance = current_price * 0.01
         max_tp_distance = current_price * 0.015
-        stop_loss_distance = min(max(atr_60m * 5, min_stop_level * tick_size), max_sl_distance)
-        take_profit_distance = min(max(atr_60m * 7.5, min_stop_level * tick_size * 1.5), max_tp_distance)
+        stop_loss_distance = min(max(atr_5m * 5, min_stop_level * tick_size), max_sl_distance)
+        take_profit_distance = min(max(atr_5m * 7.5, min_stop_level * tick_size * 1.5), max_tp_distance)
         stop_loss = round(current_price - stop_loss_distance if side == "Buy" else current_price + stop_loss_distance, 6)
         take_profit = round(current_price + take_profit_distance if side == "Buy" else current_price - take_profit_distance, 6)
         
         sl_distance = abs(current_price - stop_loss)
         tp_distance = abs(current_price - take_profit)
         min_distance = min_stop_level * tick_size
-        logging.info(f"SL Distance: {sl_distance}, TP Distance: {tp_distance}, Min Distance: {min_distance}, Current Price: {current_price}")
         if sl_distance < min_distance or tp_distance < min_distance * 1.5:
             logging.warning(f"Invalid stops: SL={stop_loss}, TP={take_profit}, Min Stop={min_distance}")
             return
 
-        # Combine features from all timeframes
-        latest_time = min(df["timestamp"].iloc[-1] for df in multi_tf_data.values())
-        logging.info(f"Latest time: {latest_time}")
-        combined_features = pd.DataFrame()
-        for tf, df in multi_tf_data.items():
-            logging.info(f"{tf} latest timestamp: {df['timestamp'].iloc[-1]}")
-            filtered_df = df[df["timestamp"] <= latest_time]
-            if filtered_df.empty:
-                logging.warning(f"No rows in {tf} with timestamp <= {latest_time}. Using latest row.")
-                latest_row = df.iloc[-1]
-            else:
-                latest_row = filtered_df.iloc[-1]
-            logging.info(f"{tf} rows after filter: {len(filtered_df)}")
-            combined_features[f"{tf}_open"] = [latest_row["open"]]
-            combined_features[f"{tf}_high"] = [latest_row["high"]]
-            combined_features[f"{tf}_low"] = [latest_row["low"]]
-            combined_features[f"{tf}_close"] = [latest_row["close"]]
-            combined_features[f"{tf}_volume"] = [latest_row["volume"]]
-            combined_features[f"{tf}_returns"] = [latest_row["returns"]]
-            combined_features[f"{tf}_atr"] = [latest_row["atr"]]
-        
-        logging.info("Features combined for prediction")
-        X_latest_scaled = scaler.transform(combined_features)
-        rf_prediction = rf_model.predict_proba(X_latest_scaled)[0][1]
-        
-        # Trade size range based on confidence
-        trade_sizes = [0.01, 0.02, 0.03, 0.04, 0.05, 0.06, 0.07, 0.08, 0.09, 0.10]
-        confidence_range = 1.0 - confidence_threshold
-        normalized_confidence = (rf_prediction - confidence_threshold) / confidence_range if rf_prediction >= confidence_threshold else 0
-        index = min(int(normalized_confidence * (len(trade_sizes) - 1)), len(trade_sizes) - 1)
-        fixed_qty = trade_sizes[index]
-        logging.info(f"Confidence: {rf_prediction*100:.2f}%, Normalized: {normalized_confidence:.2f}, Selected trade size: {fixed_qty} BTC")
-        
-        trade_qty = wallet.calculate_position_size(current_price, stop_loss_distance, fixed_qty=fixed_qty)
-        logging.info(f"Trade qty calculated: {trade_qty}")
-        if trade_qty < min_volume:
-            logging.warning(f"Trade qty {trade_qty} below minimum {min_volume}. Skipping.")
+        feature_cols = [col for col in df.columns if col not in ["timestamp"] and not col.startswith("turnover")]
+        X_latest = pd.DataFrame(df[feature_cols].iloc[-1]).T
+        X_latest_scaled = scaler.transform(X_latest)
+        rf_confidence = rf_model.predict_proba(X_latest_scaled)[0][1] if prediction == 1 else 1 - rf_model.predict_proba(X_latest_scaled)[0][1]
+        dt_confidence = dt_model.predict_proba(X_latest_scaled)[0][1] if prediction == 1 else 1 - dt_model.predict_proba(X_latest_scaled)[0][1]
+        hurst_value = hurst_exponent(df["close_5m"].values)
+        imbalance = calculate_bid_ask_imbalance(bid_volumes, ask_volumes)
+        volatility_1m = df["atr_1m"].iloc[-1] / df["close_1m"].iloc[-1] if "atr_1m" in df.columns else 0
+
+        rf_score = max(0, (rf_confidence - confidence_threshold) / (1 - confidence_threshold))
+        dt_score = max(0, (dt_confidence - confidence_threshold) / (1 - confidence_threshold))
+        markov_score = max(0, (markov_win_prob / 100 - 0.9) / 0.1)
+        hurst_score = 1 - abs(hurst_value - 0.5) * 2
+        imbalance_score = abs(imbalance)
+        volatility_score = min(volatility_1m / 0.01, 1.0)
+
+        total_score = (0.35 * rf_score + 0.15 * dt_score + 0.2 * markov_score + 
+                       0.1 * hurst_score + 0.1 * imbalance_score + 0.1 * volatility_score)
+        total_score = np.clip(total_score, 0, 1)
+
+        volume_range = [0.01, 0.02, 0.03, 0.04, 0.05, 0.06, 0.07, 0.08, 0.09, 0.10]
+        volume_index = min(int(total_score * (len(volume_range) - 1)), len(volume_range) - 1)
+        trade_qty = volume_range[volume_index]
+
+        logging.info(f"Trade Factors - RF: {rf_confidence:.2f}, DT: {dt_confidence:.2f}, Markov: {markov_win_prob:.2f}%, "
+                     f"Hurst: {hurst_value:.2f}, Imbalance: {imbalance:.2f}, Volatility 1m: {volatility_1m:.4f}")
+        logging.info(f"Scores - RF: {rf_score:.2f}, DT: {dt_score:.2f}, Markov: {markov_score:.2f}, "
+                     f"Hurst: {hurst_score:.2f}, Imbalance: {imbalance_score:.2f}, Volatility: {volatility_score:.2f}, Total: {total_score:.2f}")
+        logging.info(f"Selected trade size: {trade_qty} BTC from range {volume_range}")
+
+        adjusted_qty = wallet.calculate_position_size(current_price, stop_loss_distance, fixed_qty=trade_qty)
+        if adjusted_qty < min_volume:
+            logging.warning(f"Trade qty {adjusted_qty} below minimum {min_volume}. Skipping.")
             return
-        
-        cost = trade_qty * current_price
+
+        cost = adjusted_qty * current_price
         wallet.sync_balance()
         if cost > wallet.balance:
             logging.warning(f"Trade cost {cost:.2f} USDT exceeds balance {wallet.balance:.2f} USDT. Skipping.")
             return
 
-        # Trend alignment check with 15-minute timeframe
-        logging.info(f"Checking 15m returns: {df_15m['returns'].iloc[-1]}")
-        if (side == "Buy" and df_15m["returns"].iloc[-1] < 0) or (side == "Sell" and df_15m["returns"].iloc[-1] > 0):
-            logging.warning(f"15-minute trend opposes {side} signal. Skipping.")
-            return
-
-        logging.info("Passed 15m trend check")
-        hurst_value = hurst_exponent(df_5m["close"].values)
-        logging.info(f"Hurst value: {hurst_value}")
-        imbalance = calculate_bid_ask_imbalance(bid_volumes, ask_volumes)
-        logging.info(f"Bid-ask imbalance: {imbalance}")
         if (side == "Buy" and (hurst_value < 0.5 or imbalance < 0)) or (side == "Sell" and (hurst_value > 0.5 or imbalance > 0)):
             logging.warning(f"Unfavorable conditions for {side}: Hurst={hurst_value}, Imbalance={imbalance}")
             return
 
-        logging.info("Preparing MT5 order")
         order_type = mt5.ORDER_TYPE_BUY if side == "Buy" else mt5.ORDER_TYPE_SELL
         request = {
             "action": mt5.TRADE_ACTION_DEAL,
             "symbol": symbol,
-            "volume": trade_qty,
+            "volume": adjusted_qty,
             "type": order_type,
             "price": current_price,
             "sl": stop_loss,
@@ -502,29 +466,28 @@ def execute_trade(prediction, symbol, multi_tf_data, confidence_threshold=0.9):
             logging.error(f"Order failed: {result.comment} (retcode: {result.retcode})")
             return
 
-        logging.info(f"Placed {side} order: {trade_qty} {symbol} @ {current_price}, SL: {stop_loss}, TP: {take_profit}")
+        logging.info(f"Placed {side} order: {adjusted_qty} {symbol} @ {current_price}, SL: {stop_loss}, TP: {take_profit}")
         if side == "Buy":
-            if wallet.open_position(symbol, side, trade_qty, current_price, stop_loss, take_profit):
+            if wallet.open_position(symbol, side, adjusted_qty, current_price, stop_loss, take_profit):
                 logging.info(f"Trade recorded in wallet for {symbol}")
         elif side == "Sell" and symbol in wallet.positions:
             wallet.close_position(symbol, current_price)
 
     except Exception as e:
         logging.error(f"Error executing trade: {e}")
-        raise  # Re-raise to see full stack trace in logs
 
-# Main Loop with multi-timeframe data and periodic summaries
+# Main loop
 def main_loop():
     iteration = 0
     start_time = datetime.now()
-    last_summary_time = start_time  # Track last summary log time
-    summary_interval = timedelta(minutes=60)  # Log summaries every hour
+    last_performance_log = datetime.now()
+    performance_interval = timedelta(minutes=60)
 
     while True:
         try:
-            multi_tf_data = fetch_multi_timeframe_data(symbol, timeframes=["5", "15", "60"], limit=200)
-            if not multi_tf_data or "5" not in multi_tf_data:
-                logging.warning("No 5-minute data fetched, skipping iteration.")
+            df = fetch_combined_data(symbol, timeframes=["1", "3", "5"], limit=200)
+            if df.empty:
+                logging.warning("No data fetched, skipping iteration.")
                 time.sleep(5)
                 continue
 
@@ -534,47 +497,41 @@ def main_loop():
             logging.info(f"Current State: {current_state}, Entropy: {entropy:.2f} bits, Markov Win Prob: {markov_win_prob:.2f}%")
 
             if current_state == "Win" and markov_win_prob >= 90:
-                # Combine features for prediction
-                combined_features = pd.DataFrame()
-                for tf, df in multi_tf_data.items():
-                    latest_row = df.iloc[-1]
-                    combined_features[f"{tf}_open"] = [latest_row["open"]]
-                    combined_features[f"{tf}_high"] = [latest_row["high"]]
-                    combined_features[f"{tf}_low"] = [latest_row["low"]]
-                    combined_features[f"{tf}_close"] = [latest_row["close"]]
-                    combined_features[f"{tf}_volume"] = [latest_row["volume"]]
-                    combined_features[f"{tf}_returns"] = [latest_row["returns"]]
-                    combined_features[f"{tf}_atr"] = [latest_row["atr"]]
-                
-                X_latest_scaled = scaler.transform(combined_features)
+                feature_cols = [col for col in df.columns if col not in ["timestamp"] and not col.startswith("turnover")]
+                X_latest = pd.DataFrame(df[feature_cols].iloc[-1]).T
+                X_latest_scaled = scaler.transform(X_latest)
                 rf_prediction = rf_model.predict_proba(X_latest_scaled)[0][1]
                 dt_prediction = dt_model.predict_proba(X_latest_scaled)[0][1]
                 prediction = 1 if rf_prediction > 0.9 or dt_prediction > 0.9 else 0
                 logging.info(f"RF Win Prob: {rf_prediction*100:.2f}%, DT Win Prob: {dt_prediction*100:.2f}%, Prediction: {prediction}")
-                execute_trade(prediction, symbol, multi_tf_data, confidence_threshold=0.9)
+                execute_trade(prediction, symbol, df, confidence_threshold=0.9, markov_win_prob=markov_win_prob)
 
             iteration += 1
-            current_time = datetime.now()
-
-            # Log overall performance summary every 10 iterations
             if iteration % 10 == 0:
                 summary = wallet.get_performance_summary()
-                logging.info(f"Performance Summary (Since {start_time.strftime('%Y-%m-%d %H:%M:%S')}): "
+                logging.info(f"Overall Performance Summary (Since {start_time.strftime('%Y-%m-%d %H:%M:%S')}): "
                              f"Start Value: {summary['start_value']:.2f} USDT, Final Value: {summary['final_value']:.2f} USDT, "
                              f"Total Return: {summary['total_return']:.2f}%, Profit Factor: {summary['profit_factor']:.2f}, "
                              f"Avg Trade Return: {summary['avg_trade_return']:.2f}%, Trades: {summary['total_trades']}, "
                              f"Win Rate: {summary['win_rate']:.2f}%, Balance: {summary['current_balance']:.2f} USDT")
+
+                current_time = datetime.now()
+                if current_time - last_performance_log >= performance_interval:
+                    periodic_performance = wallet.get_periodic_performance()
+                    for period, metrics in periodic_performance.items():
+                        logging.info(f"{period} Performance: "
+                                     f"Start Value: {metrics['start_value']:.2f} USDT, Final Value: {metrics['final_value']:.2f} USDT, "
+                                     f"Total Return: {metrics['total_return']:.2f}%, Profit Factor: {metrics['profit_factor']:.2f}, "
+                                     f"Avg Trade Return: {metrics['avg_trade_return']:.2f}%, Trades: {metrics['total_trades']}, "
+                                     f"Win Rate: {metrics['win_rate']:.2f}%, Balance: {metrics['current_balance']:.2f} USDT")
+                    last_performance_log = current_time
+
                 if summary["win_rate"] < 30 and summary["total_trades"] > 10:
                     wallet.max_risk_per_trade = max(0.005, wallet.max_risk_per_trade * 0.8)
                     logging.info(f"Reduced risk to {wallet.max_risk_per_trade*100}% due to low win rate.")
                 elif summary["win_rate"] > 70:
                     wallet.max_risk_per_trade = min(0.03, wallet.max_risk_per_trade * 1.2)
                     logging.info(f"Increased risk to {wallet.max_risk_per_trade*100}% due to high win rate.")
-
-            # Log periodic summaries every hour
-            if current_time - last_summary_time >= summary_interval:
-                wallet.log_periodic_summaries()
-                last_summary_time = current_time
 
             time.sleep(5)
         except Exception as e:
