@@ -18,6 +18,6 @@ Microstructure noise, Fractal dimensions, Hust exponent and Bid/ask volume imbal
 Next ive added a feature to lower my risk within trades, SL and TP on each trade
 Given a range of volume order of 0.01 - 0.02 - 0.03 - 0.04 - 0.05 - 0.06 - 0.07 - 0.08 - 0.08 - 0.09 0.10  Depending on factors within the script 
 
-Next added multiple timeframes to pick trends and recieve data from , 5min,15min and 1hr
+Next added multiple timeframes to pick trends and recieve data from , 1min,3min,5min
 
-Lastly added a Daily/Weekly/Monthly Summarise of performance 
+Lastly added a Hourly/4Hourly/12Hourly/Daily/Weekly/Monthly Summarise of performance 
